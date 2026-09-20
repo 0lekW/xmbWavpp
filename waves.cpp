@@ -1,276 +1,301 @@
-#include <iostream>
-#include <vector>
+// ============================================================================
+//  XMB Wave — terminal ASCII port of the RetroArch "XMB Ribbon" shader.
+//
+//  This is a faithful reimplementation of the original THREE.js wallpaper
+//  (js/index.js from the Wallpaper Engine item). The original renders a
+//  128x128 plane whose vertices are displaced in a WebGL vertex shader, then
+//  shaded in a fragment shader using screen-space derivatives.
+//
+//  Build:  g++ -O2 -std=c++17 -o waves waves.cpp
+//  Run:    ./waves          (Ctrl-C to quit)
+// ============================================================================
+
 #include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <csignal>
+#include <string>
+#include <vector>
 #include <chrono>
 #include <thread>
-#include <sys/ioctl.h>
-#include <unistd.h>
-#include <cstring>
 #include <algorithm>
 
-// camera (eye) position
-const float EYE_X =  0.0f;
-const float EYE_Y = 0.0f;
-const float EYE_Z = -20.0f;
+/* 
+Terminal size / VT setup differs per platform. The primary target is a
+Unix terminal (Linux/macOS/WSL); a Windows fallback is provided so the same
+single file builds and runs everywhere. 
+*/
 
-// point to look at
-const float TARGET_X = 0.0f;
-const float TARGET_Y = 0.0f;
-const float TARGET_Z = 0.0f;
+#if defined(_WIN32)
+  #define WIN32_LEAN_AND_MEAN
+  #include <windows.h>
+#else
+  #include <sys/ioctl.h>
+  #include <unistd.h>
+#endif
 
-// “up” direction
-const float UP_X = 0.0f;
-const float UP_Y = 1.0f;
-const float UP_Z = 0.0f;
-
-// focal length
-const float FOCAL = 90.0f;
-
-const float ZOOM_OUT_SCALE = 1.5f;
-
-const char* SHADES  = " .:-=+*#%@";
-const int   NSHADES = std::strlen(SHADES);
-
+//  Small vector helper
 struct Vec3 { float x, y, z; };
-static Vec3 normalize(const Vec3& v) {
-    float m = std::sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
-    return { v.x/m, v.y/m, v.z/m };
+
+static inline Vec3 cross(const Vec3& a, const Vec3& b) {
+    return { a.y*b.z - a.z*b.y,
+             a.z*b.x - a.x*b.z,
+             a.x*b.y - a.y*b.x };
 }
-static Vec3 cross(const Vec3& a, const Vec3& b) {
-    return {
-        a.y*b.z - a.z*b.y,
-        a.z*b.x - a.x*b.z,
-        a.x*b.y - a.y*b.x
-    };
-}
-static float dot(const Vec3& a, const Vec3& b) {
+static inline float dot(const Vec3& a, const Vec3& b) {
     return a.x*b.x + a.y*b.y + a.z*b.z;
 }
-
-// ——— Improved Perlin 3D noise ———
-static const int PERM[512] = {
-    151,160,137,91,90,15,
-    131,13,201,95,96,53,194,233,7,225,140,36,103,30,69,142,
-    8,99,37,240,21,10,23,190, 6,148,247,120,234,75,0,26,
-    197,62,94,252,219,203,117,35,11,32,57,177,33,88,237,149,
-    56,87,174,20,125,136,171,168, 68,175,74,165,71,134,139,48,
-    27,166,77,146,158,231,83,111,229,122,60,211,133,230,220,105,
-    92,41,55,46,245,40,244,102,143,54, 65,25,63,161, 1,216,
-    80,73,209,76,132,187,208, 89,18,169,200,196,135,130,116,188,
-    159,86,164,100,109,198,173,186,  3,64,52,217,226,250,124,123,
-    5,202,38,147,118,126,255,82,85,212,207,206,59,227,47,16,
-    58,17,182,189,28,42,223,183,170,213,119,248,152,  2,44,154,
-    163, 70,221,153,101,155,167,  43,172,9,129,22,39,253, 19,98,
-    108,110,79,113,224,232,178,185,112,104,218,246,97,228,251,34,
-    242,193,238,210,144,12,191,179,162,241, 81,51,145,235,249,14,
-    239,107,49,192,214, 31,181,199,106,157,184, 84,204,176,115,121,
-    50,45,127,  4,150,254,138,236,205, 93,222,114, 67,29,24,72,
-    243,141,128,195,78,66,215,61,156,180,
-    // repeat again:
-    151,160,137,91,90,15,
-    131,13,201,95,96,53,194,233,7,225,140,36,103,30,69,142,
-    8,99,37,240,21,10,23,190, 6,148,247,120,234,75,0,26,
-    197,62,94,252,219,203,117,35,11,32,57,177,33,88,237,149,
-    56,87,174,20,125,136,171,168, 68,175,74,165,71,134,139,48,
-    27,166,77,146,158,231,83,111,229,122,60,211,133,230,220,105,
-    92,41,55,46,245,40,244,102,143,54, 65,25,63,161, 1,216,
-    80,73,209,76,132,187,208, 89,18,169,200,196,135,130,116,188,
-    159,86,164,100,109,198,173,186,  3,64,52,217,226,250,124,123,
-    5,202,38,147,118,126,255,82,85,212,207,206,59,227,47,16,
-    58,17,182,189,28,42,223,183,170,213,119,248,152,  2,44,154,
-    163, 70,221,153,101,155,167,  43,172,9,129,22,39,253, 19,98,
-    108,110,79,113,224,232,178,185,112,104,218,246,97,228,251,34,
-    242,193,238,210,144,12,191,179,162,241, 81,51,145,235,249,14,
-    239,107,49,192,214, 31,181,199,106,157,184, 84,204,176,115,121,
-    50,45,127,  4,150,254,138,236,205, 93,222,114, 67,29,24,72,
-    243,141,128,195,78,66,215,61,156,180
-};
-
-static float fadef(float t) { return t * t * t * (t * (t * 6 - 15) + 10); }
-static float lerpf(float a, float b, float t) { return a + t*(b - a); }
-static float grad(int hash, float x, float y, float z) {
-    int h = hash & 15;          
-    float u = h<8 ? x : y;      
-    float v = h<4 ? y : (h==12||h==14 ? x : z);
-    return ((h&1)? -u : u) + ((h&2)? -v : v);
+static inline Vec3 normalize(const Vec3& v) {
+    float m = std::sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
+    if (m < 1e-8f) return {0.0f, 0.0f, 0.0f};
+    return { v.x/m, v.y/m, v.z/m };
 }
 
-float perlin3d(float x, float y, float z) {
-    int X = int(std::floor(x)) & 255;
-    int Y = int(std::floor(y)) & 255;
-    int Z = int(std::floor(z)) & 255;
-    x -= std::floor(x); y -= std::floor(y); z -= std::floor(z);
-    float u = fadef(x), v = fadef(y), w = fadef(z);
+// GLSL built-ins used by the shader.
+static inline float fract(float x) { return x - std::floor(x); }
+static inline float mix(float a, float b, float t) { return a + t*(b - a); } // GLSL mix()
 
-    int A  = PERM[X] + Y,   AA = PERM[A] + Z,   AB = PERM[A + 1] + Z;
-    int B  = PERM[X+1] + Y, BA = PERM[B] + Z,   BB = PERM[B + 1] + Z;
-
-    float res = lerpf(
-      lerpf(
-        lerpf( grad(PERM[AA],   x,   y,   z),
-               grad(PERM[BA], x-1.0f,y,   z), u),
-        lerpf( grad(PERM[AB],   x, y-1.0f,   z),
-               grad(PERM[BB], x-1.0f,y-1.0f,  z), u),
-         v),
-      lerpf(
-        lerpf( grad(PERM[AA+1],   x,   y,   z-1.0f),
-               grad(PERM[BA+1], x-1.0f,y,   z-1.0f), u),
-        lerpf( grad(PERM[AB+1],   x, y-1.0f,   z-1.0f),
-               grad(PERM[BB+1], x-1.0f,y-1.0f, z-1.0f), u),
-         v),
-      w);
-    return res; // in [-1..1]
+// Noise — ported verbatim from the original vertex shader.
+static inline float iqhash(float n) { return fract(std::sin(n) * 43758.5453f); }
+static float noise(const Vec3& x) {
+    Vec3 p { std::floor(x.x), std::floor(x.y), std::floor(x.z) };
+    Vec3 f { fract(x.x), fract(x.y), fract(x.z) };
+    f = { f.x*f.x*(3.0f - 2.0f*f.x),
+          f.y*f.y*(3.0f - 2.0f*f.y),
+          f.z*f.z*(3.0f - 2.0f*f.z) };
+    float n = p.x + p.y*57.0f + 113.0f*p.z;
+    return mix(mix(mix(iqhash(n),        iqhash(n + 1.0f),   f.x),
+                   mix(iqhash(n + 57.0f),  iqhash(n + 58.0f),  f.x), f.y),
+               mix(mix(iqhash(n + 113.0f), iqhash(n + 114.0f), f.x),
+                   mix(iqhash(n + 170.0f), iqhash(n + 171.0f), f.x), f.y), f.z);
 }
 
-// Simple 3D hash noise
-inline float fract(float x) { return x - std::floor(x); }
-inline float lerp(float a, float b, float t) { return a + t*(b - a); }
-inline float iqhash(float n) { return fract(std::sin(n) * 43758.5453f); }
-
-float noise(const Vec3& x) {
-    Vec3 p{std::floor(x.x), std::floor(x.y), std::floor(x.z)};
-    Vec3 f{fract(x.x), fract(x.y), fract(x.z)};
-    f = { f.x*f.x*(3.0f - 2.0f*f.x), f.y*f.y*(3.0f - 2.0f*f.y), f.z*f.z*(3.0f - 2.0f*f.z) };
-    float n = p.x + p.y*57.0f + p.z*113.0f;
-    float m0 = lerp(iqhash(n),       iqhash(n+1.0f),   f.x);
-    float m1 = lerp(iqhash(n+57.0f), iqhash(n+58.0f),  f.x);
-    float m2 = lerp(iqhash(n+113.0f),iqhash(n+114.0f), f.x);
-    float m3 = lerp(iqhash(n+170.0f),iqhash(n+171.0f), f.x);
-    float a = lerp(m0, m1, f.y);
-    float b = lerp(m2, m3, f.y);
-    return lerp(a, b, f.z);
+static inline float xmb_noise2(const Vec3& x, float time) {
+    return std::cos(x.z * 4.0f) * std::cos(x.z + time / 10.0f + x.x);
 }
 
-// trig-based noise2
-inline float noise2(float x, float z, float t) {
-    return std::cos(z * 4.0f) * std::cos(z + t/10.0f + x);
+// ---------------------------------------------------------------------------
+//  Base plane extents.
+//
+//  The original builds the ribbon from the *projected* plane:
+//    vec4 pos = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+//    vec3 v   = vec3(pos.x, 0.0, pos.y);
+//  with PlaneGeometry(1,1,128,128)  -> position in [-0.5, 0.5]^2
+//       ribbon.scale = (aspect * 1.55, 0.75, 1)
+//       PerspectiveCamera(75, aspect, ...), camera.z = 2
+//
+//  Working the perspective projection through by hand, the aspect ratio
+//  cancels out (the x-scale multiplies by aspect, the projection divides by
+//  it), leaving a fixed clip-space plane:
+//     pos.x = f * 1.55 * px,   pos.y = f * 0.75 * py
+//  where f = 1 / tan(fov/2), fov = 75deg, and px,py in [-0.5, 0.5].
+//
+//  So the ribbon's base coordinates are independent of terminal aspect:
+//     v.x in ~[-1.01, 1.01],  v.z in ~[-0.489, 0.489].
+// ---------------------------------------------------------------------------
+static const float FOV_DEG   = 75.0f;
+static const float FOCAL     = 1.0f / std::tan((FOV_DEG * 0.5f) * 3.14159265358979323846f / 180.0f);
+static const float PLANE_X   = FOCAL * 1.55f;   // half-extent multiplier for v.x
+static const float PLANE_Z   = FOCAL * 0.75f;   // half-extent multiplier for v.z
+
+
+//  Vertex displacement — ported verbatim from the vertex shader main()
+static Vec3 ribbon_vertex(float px, float py, float time) {
+    // vec3 v = vec3(pos.x, 0.0, pos.y);
+    Vec3 v { PLANE_X * px, 0.0f, PLANE_Z * py };
+    Vec3 v2 = v;
+    Vec3 v3 = v;
+
+    // v.y = xmb_noise2(v2) / 8.0;
+    v.y = xmb_noise2(v2, time) / 8.0f;
+
+    // v3.x -= time / 5.0;  v3.x /= 4.0;
+    v3.x -= time / 5.0f;
+    v3.x /= 4.0f;
+    // v3.z -= time / 10.0;  v3.y -= time / 100.0;
+    v3.z -= time / 10.0f;
+    v3.y -= time / 100.0f;
+
+    // noise(v3 * 7.0) — evaluated once, used twice below.
+    float n = noise(Vec3{ v3.x * 7.0f, v3.y * 7.0f, v3.z * 7.0f });
+
+    // v.z -= noise(v3 * 7.0) / 15.0;
+    v.z -= n / 15.0f;
+    // v.y -= noise(v3 * 7.0) / 15.0 + cos(v.x * 2.0 - time / 2.0) / 5.0 - 0.3;
+    v.y -= n / 15.0f + std::cos(v.x * 2.0f - time / 2.0f) / 5.0f - 0.3f;
+
+    return v; // == vEC (the varying passed to the fragment shader)
 }
 
-// directional light direction
-const Vec3 LIGHT_DIR = normalize(Vec3{0.0f, 1.0f, 1.0f});
-
-// evaluate the surface point at (x,z)
-Vec3 eval_surface(float x, float z, float t) {
-    float y1 = std::sin(x * 0.3f + t);
-    float y2 = std::cos(z * 0.3f + t * 1.5f);
-    Vec3 p = { x, y1 + y2, z };
-    Vec3 d2 = { (p.x - t/5.0f) / 4.0f, -t/100.0f, (p.z - t/10.0f) / 4.0f };
-    //float n1 = noise(Vec3{d2.x*7.0f, d2.y*7.0f, d2.z*7.0f}) / 15.0f;
-    float n1 = perlin3d(d2.x*0.7, d2.y*0.7, d2.z*0.7) * 0.1;
-    float n2 = noise2(d2.x, d2.z, t) * 0.2f;
-    p.y -= (n1 + n2);
-    p.z -= (n1 + n2) * 0.5f;
-    return p;
+//  Fragment shading — ported from the fragment shader.
+static inline float ribbon_alpha(const Vec3& ddx, const Vec3& ddy) {
+    const Vec3 up { 0.0f, 0.0f, 1.0f };
+    Vec3 normal = normalize(cross(ddx, ddy));
+    float c = 1.0f - dot(normal, up);
+    c = (1.0f - std::cos(c * c)) / 3.0f;
+    return c * 1.5f; // gl_FragColor.a
 }
+
+// ---------------------------------------------------------------------------
+//  Presentation constants. The math above is exact; these only control how
+//  the fixed clip-space ribbon is mapped into terminal cells (the browser
+//  version fills the viewport, here we choose a framing).
+// ---------------------------------------------------------------------------
+static const float NDC_HALF_WIDTH = 1.05f;  // v.x range mapped across the width
+static const float V_CENTER       = 0.27f;  // approx. mean of v.y (ribbon center)
+static const float V_GAIN         = 1.9f;   // vertical amplification (terminal cells are tall)
+
+// ASCII intensity ramp (dark -> bright), matching the alpha of the ribbon.
+static const char* SHADES  = " .:-=+*#%@";
+static const int   NSHADES = 10;
+
+// ---------------------------------------------------------------------------
+//  Terminal handling.
+// ---------------------------------------------------------------------------
+static void get_term_size(int& w, int& h) {
+#if defined(_WIN32)
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi)) {
+        w = csbi.srWindow.Right  - csbi.srWindow.Left + 1;
+        h = csbi.srWindow.Bottom - csbi.srWindow.Top  + 1;
+    } else {
+        w = 80; h = 24;
+    }
+#else
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0) {
+        w = ws.ws_col;
+        h = ws.ws_row;
+    } else {
+        w = 80; h = 24;
+    }
+#endif
+}
+
+// On Windows, opt the console into ANSI/VT escape-sequence processing so the
+// same escape codes used on Unix work here too. No-op elsewhere.
+static void enable_vt_mode() {
+#if defined(_WIN32)
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD mode = 0;
+    if (GetConsoleMode(hOut, &mode))
+        SetConsoleMode(hOut, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    SetConsoleOutputCP(CP_UTF8);
+#endif
+}
+
+static volatile std::sig_atomic_t g_running = 1;
+static void on_sigint(int) { g_running = 0; }
 
 int main() {
-    float t = 0.0f;
-    const float dt = 0.1f;
+    std::signal(SIGINT,  on_sigint);
+#ifdef SIGTERM
+    std::signal(SIGTERM, on_sigint);
+#endif
+    enable_vt_mode();
 
-    // detect terminal size
-    struct winsize ws;
-    ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws);
-    int WIDTH  = ws.ws_col;
-    int HEIGHT = ws.ws_row > 2 ? ws.ws_row - 2 : ws.ws_row;
+    int W = 0, H = 0;
+    get_term_size(W, H);
 
-    int MESH_X = WIDTH * 2;
-    int MESH_Z = HEIGHT * 2;
+    // ORIGINAL: ribbon.material.uniforms.time.value starts at 1.0.
+    float time = 1.0f;
+    const float TIME_STEP = 0.01f;                      // matches uniforms.time += 0.01
+    const auto  FRAME = std::chrono::milliseconds(16);  // ~60 fps, like requestAnimationFrame
 
-    // build camera basis
-    Vec3 eye    = {EYE_X, EYE_Y, EYE_Z};
-    Vec3 target = {TARGET_X, TARGET_Y, TARGET_Z};
-    Vec3 updir  = {UP_X, UP_Y, UP_Z};
-    Vec3 fwd    = normalize(Vec3{ target.x - eye.x, target.y - eye.y, target.z - eye.z });
-    Vec3 right  = normalize(cross(fwd, updir));
-    Vec3 up     = cross(right, fwd);
+    std::vector<float> bright;
+    std::string frame;
 
-    // compute plane size
-    Vec3 te = { target.x - eye.x, target.y - eye.y, target.z - eye.z };
-    float cz0 = dot(te, fwd);
-    float fullPlaneD = cz0 * HEIGHT / FOCAL;
-    float halfD = fullPlaneD * 0.5f;
-    float cz_near = cz0 - halfD;
-    float planeW = cz_near * WIDTH  / FOCAL * ZOOM_OUT_SCALE;
-    float planeD = fullPlaneD       * ZOOM_OUT_SCALE;
+    std::printf("\x1b[?25l");   // hide cursor
+    std::printf("\x1b[2J");     // clear screen
 
-    float NEAR_CLIP = cz0 - planeD * 0.5f;
-    float FAR_CLIP  = cz0 + planeD * 0.5f;
+    while (g_running) {
+        // Handle terminal resizes on the fly.
+        int nw, nh;
+        get_term_size(nw, nh);
+        if (nw != W || nh != H) {
+            W = nw; H = nh;
+            std::printf("\x1b[2J");
+        }
+        if (W < 2 || H < 2) { std::this_thread::sleep_for(FRAME); continue; }
 
-    float dx = planeW / (MESH_X - 1);
-    float dz = planeD / (MESH_Z - 1);
+        bright.assign((size_t)W * H, 0.0f);
 
-    // buffers
-    std::vector<char>  screen(WIDTH * HEIGHT);
-    std::vector<float> zbuf  (WIDTH * HEIGHT);
-    std::vector<float> bright(WIDTH * HEIGHT);
-
-    std::cout << "\x1b[2J";
-    while (true) {
-        std::fill(screen.begin(), screen.end(), ' ');
-        std::fill(zbuf.begin(),   zbuf.end(),   1e9f);
+        // Sample density: enough columns to cover the width, and enough rows
+        // per column so the swept band has no vertical gaps.
+        const int MESH_X = std::max(W * 2, 64);
+        const int MESH_Z = std::max(H * 8, 256);
+        const float EPS  = 1.0f / 1024.0f; // finite-difference step in plane params
 
         for (int ix = 0; ix < MESH_X; ++ix) {
-            float x = (ix/(float)(MESH_X-1) - 0.5f) * planeW;
+            float px = (float)ix / (float)(MESH_X - 1) - 0.5f; // [-0.5, 0.5]
             for (int iz = 0; iz < MESH_Z; ++iz) {
-                float z = (iz/(float)(MESH_Z-1) - 0.5f) * planeD;
-                // sample surface
-                Vec3 p  = eval_surface(x,     z,     t);
-                Vec3 pR = eval_surface(x+dx,  z,     t);
-                Vec3 pD = eval_surface(x,     z+dz,  t);
-                // normal & lighting
-                Vec3 N = normalize(cross(
-                      Vec3{pD.x-p.x, pD.y-p.y, pD.z-p.z},
-                      Vec3{pR.x-p.x, pR.y-p.y, pR.z-p.z}
-                      ));
-                float rawL = dot(N, LIGHT_DIR);
-                const float AMBIENT = 0.0f;
-                float L = AMBIENT + (1 - AMBIENT) * rawL;
-                L = std::min(std::max(L, 0.0f), 1.0f);
+                float py = (float)iz / (float)(MESH_Z - 1) - 0.5f; // [-0.5, 0.5]
 
+                Vec3 p  = ribbon_vertex(px,       py,       time);
+                Vec3 dx = ribbon_vertex(px + EPS, py,       time);
+                Vec3 dy = ribbon_vertex(px,       py + EPS, time);
 
-                // camera space
-                Vec3 v_cam = { p.x - eye.x, p.y - eye.y, p.z - eye.z };
-                float cz    = dot(v_cam, fwd);
-                if (cz <= 0.1f) continue;
-                float proj = FOCAL / cz;
-                int sx = int(dot(v_cam, right) * proj + WIDTH/2);
-                int sy = int(HEIGHT/2 - dot(v_cam, up) * proj);
-                if (sx < 0 || sx >= WIDTH || sy < 0 || sy >= HEIGHT) continue;
+                float alpha = ribbon_alpha(
+                    Vec3{ dx.x - p.x, dx.y - p.y, dx.z - p.z },
+                    Vec3{ dy.x - p.x, dy.y - p.y, dy.z - p.z });
+                if (alpha <= 0.0f) continue;
 
-                int idx = sy * WIDTH + sx;
-                if (cz < zbuf[idx]) {
-                    zbuf[idx] = cz;
-                    bright[idx] = L;
-                    int shadeIdx = int((1.0f - L) * (NSHADES - 1));
-                    screen[idx] = SHADES[shadeIdx];
+                // NDC (v.xy) -> screen cell.
+                float sxf = ( p.x / NDC_HALF_WIDTH * 0.5f + 0.5f) * (W - 1);
+                float syf = ( 0.5f - (p.y - V_CENTER) * V_GAIN * 0.5f) * (H - 1);
+                int sx = (int)(sxf + 0.5f);
+                int sy = (int)(syf + 0.5f);
+                if (sx < 0 || sx >= W || sy < 0 || sy >= H) continue;
+
+                // Alpha-blended white over background -> keep the strongest.
+                float& b = bright[(size_t)sy * W + sx];
+                if (alpha > b) b = alpha;
+            }
+        }
+
+        // Compose the frame.
+        frame.clear();
+        frame.reserve((size_t)W * H * 20 + H * 8);
+        frame += "\x1b[H"; // cursor home
+
+        int lastFg = -1;
+        for (int y = 0; y < H; ++y) {
+            for (int x = 0; x < W; ++x) {
+                float b = bright[(size_t)y * W + x];
+                float bc = std::min(std::max(b, 0.0f), 1.0f);
+
+                if (bc <= 0.02f) {
+                    frame += ' '; // transparent — the terminal's own background
+                    continue;
                 }
+
+                // Ribbon cell: white with brightness from alpha.
+                int gray = 232 + (int)(bc * 23.0f + 0.5f); // 232..255 grayscale ramp
+                int shadeIdx = (int)(bc * (NSHADES - 1) + 0.5f);
+                if (shadeIdx < 0) shadeIdx = 0;
+                if (shadeIdx >= NSHADES) shadeIdx = NSHADES - 1;
+
+                if (gray != lastFg) {
+                    char buf[24];
+                    std::snprintf(buf, sizeof(buf), "\x1b[38;5;%dm", gray);
+                    frame += buf;
+                    lastFg = gray;
+                }
+                frame += SHADES[shadeIdx];
             }
+            frame += "\x1b[0m";
+            lastFg = -1;
+            if (y != H - 1) frame += '\n';
         }
 
+        std::fwrite(frame.data(), 1, frame.size(), stdout);
+        std::fflush(stdout);
 
-        // draw frame with 256-color grayscale
-        std::cout << "\x1b[H";  // cursor home
-        for (int y = 0; y < HEIGHT; ++y) {
-            for (int x = 0; x < WIDTH; ++x) {
-                int idx = y*WIDTH + x;
-
-                // map bright[idx] ∈ [0..1] → gray level 0..23
-                float bclamped = std::min(std::max(bright[idx], 0.0f), 1.0f);
-                int   grayLevel = int(bclamped * 23.0f + 0.5f);
-                int   ansiCode  = 232 + grayLevel;      // 232..255
-
-                // set FG to that gray, then print your char (or block)
-                std::cout
-                  << "\x1b[38;5;" << ansiCode << "m"
-                  << screen[idx];
-            }
-            // reset color and newline
-            std::cout << "\x1b[0m\n";
-        }
-        std::cout.flush();
-
-        t += dt;
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        time += TIME_STEP;
+        std::this_thread::sleep_for(FRAME);
     }
+
+    std::printf("\x1b[0m\x1b[?25h\n"); // reset colors, show cursor
+    std::fflush(stdout);
     return 0;
 }

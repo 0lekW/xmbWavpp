@@ -2,8 +2,6 @@
 
 This is a command-line animation that replicates the iconic wave effect from the PlayStation 3 XMB (Cross Media Bar) menu.
 
-Originally inspired by the smooth, flowing motion of the PS3's system interface, this project brings a minimalist version of that aesthetic into the terminal.
-
 ## Features
 
 - Terminal-based wave animation
@@ -15,7 +13,7 @@ This project consists of a single C++ file: `waves.cpp`.
 
 ### Requirements
 - A C++ compiler (e.g. `g++`)
-- A Unix-like terminal (Linux/macOS/WSL)
+- A Unix-like terminal (Linux/macOS/WSL). Also builds on Windows (MinGW/MSVC).
 
 ### Compile and Run
 
